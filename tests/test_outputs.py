@@ -35,21 +35,31 @@ def base(measurements, *, zero=0.0, limits=(350.0, 500.0)):
     }
 
 
-def run(data):
+def run_process(data):
     env = dict(os.environ)
-    with pytest.MonkeyPatch.context() as patch:
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            input_path = Path(tmp) / "input.json"
-            output_path = Path(tmp) / "output.json"
-            input_path.write_text(json.dumps(data), encoding="utf-8")
-            process = subprocess.run([sys.executable, str(PROGRAM), str(input_path), str(output_path)], capture_output=True, text=True, env=env)
-            if process.returncode != 0 or not output_path.exists():
-                return None
-            try:
-                return json.loads(output_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                return None
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        input_path = Path(tmp) / "input.json"
+        output_path = Path(tmp) / "output.json"
+        input_path.write_text(json.dumps(data), encoding="utf-8")
+        process = subprocess.run(
+            [sys.executable, str(PROGRAM), str(input_path), str(output_path)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        output_text = output_path.read_text(encoding="utf-8") if output_path.exists() else None
+        return process, output_text
+
+
+def run(data):
+    process, output_text = run_process(data)
+    if process.returncode != 0 or output_text is None:
+        return None
+    try:
+        return json.loads(output_text)
+    except json.JSONDecodeError:
+        return None
 
 
 def stress(result, azimuth):
@@ -185,3 +195,35 @@ def test_tensile_boundary_does_not_mask_compressive_exceedance():
     rows += [measurement(90, -620.0, tilt) for tilt in (0, 25, 50, 70)]
     result = run(base(rows, limits=(350.0, 500.0)))
     assert result and result["status"] == "REJECT"
+
+
+def test_near_zero_tilt_variation_requires_review():
+    """题面要求有效倾转点几乎没有变化时不能输出应力，必须进入复核。"""
+    rows = [
+        measurement(0, 100.0, 0.0),
+        measurement(0, 100.0, 1e-6),
+        measurement(0, 100.0, 2e-6),
+    ]
+    result = run(base(rows))
+    assert result is not None
+    assert result["status"] == "REVIEW"
+    assert result["directions"] == []
+    assert "INSUFFICIENT_TILT_VARIATION" in issue_codes(result)
+
+
+def test_invalid_limits_are_rejected():
+    """题面要求工艺限值必须是包含两个非负有限数值的对象。"""
+    invalid_limits = (
+        None,
+        {},
+        {"max_tensile_mpa": 350.0},
+        {"max_compressive_mpa": 500.0},
+        {"max_tensile_mpa": -1.0, "max_compressive_mpa": 500.0},
+        {"max_tensile_mpa": "350", "max_compressive_mpa": 500.0},
+        {"max_tensile_mpa": True, "max_compressive_mpa": 500.0},
+    )
+    for limits in invalid_limits:
+        data = base([measurement(0, 100.0, tilt) for tilt in (0, 30, 60)])
+        data["limits"] = limits
+        process, _ = run_process(data)
+        assert process.returncode != 0
