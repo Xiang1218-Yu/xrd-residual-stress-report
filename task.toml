@@ -3,7 +3,7 @@ schema_version = "1.3"
 [task]
 name = "local/xrd-residual-stress-report"
 description = "修复热处理轴承钢滚道的 X 射线衍射残余应力分析程序"
-authors = [{ name = "OpenAI" }]
+authors = [{ name = "xyj" }]
 keywords = ["X-ray diffraction", "materials", "residual stress", "scientific computing"]
 
 [agent]

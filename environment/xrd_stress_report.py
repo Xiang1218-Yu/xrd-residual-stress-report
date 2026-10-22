@@ -39,10 +39,11 @@ def analyze(data):
     grouped = defaultdict(list)
     issues = []
     for row in data.get("measurements", []):
-        if not all(key in row for key in ("azimuth_deg", "tilt_deg", "peak_2theta_deg", "quality")):
+        required = ("azimuth_deg", "tilt_deg", "peak_2theta_deg", "quality")
+        if not all(key in row for key in required):
             issues.append("MALFORMED_MEASUREMENT")
             continue
-        if not all(_finite(row[key]) for key in ("azimuth_deg", "tilt_deg", "peak_2theta_deg", "quality")):
+        if not all(_finite(row[key]) for key in required):
             issues.append("NONFINITE_MEASUREMENT")
             continue
         if row["tilt_deg"] < 0 or row["tilt_deg"] > 85 or row["peak_2theta_deg"] <= 0:
@@ -82,11 +83,15 @@ def analyze(data):
         max_compressive = 0.0
         worst = None
     else:
-        max_tensile = max((item["stress_mpa"] for item in directions), default=0.0)
-        max_compressive = min((item["stress_mpa"] for item in directions), default=0.0)
+        max_tensile = max((max(item["stress_mpa"], 0.0) for item in directions), default=0.0)
+        max_compressive = min((min(item["stress_mpa"], 0.0) for item in directions), default=0.0)
         worst_item = min(directions, key=lambda item: (-abs(item["stress_mpa"]), item["azimuth_deg"]))
         worst = worst_item["azimuth_deg"]
-        status = "PASS" if max_tensile <= float(limits["max_tensile_mpa"]) and abs(max_compressive) <= float(limits["max_compressive_mpa"]) else "REJECT"
+        tensile_limit = float(limits["max_tensile_mpa"])
+        compressive_limit = float(limits["max_compressive_mpa"])
+        tensile_ok = max_tensile <= tensile_limit or math.isclose(max_tensile, tensile_limit, rel_tol=1e-9, abs_tol=1e-9)
+        compressive_ok = abs(max_compressive) <= compressive_limit or math.isclose(abs(max_compressive), compressive_limit, rel_tol=1e-9, abs_tol=1e-9)
+        status = "PASS" if tensile_ok and compressive_ok else "REJECT"
 
     return {
         "specimen_id": data["specimen_id"],

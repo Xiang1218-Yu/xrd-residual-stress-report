@@ -4,23 +4,29 @@ import math
 import sys
 from collections import defaultdict
 
+REQUIRED_TOP = ("specimen_id", "material", "wavelength_nm", "stress_free_d_nm", "youngs_modulus_gpa", "poisson_ratio", "limits", "measurements")
+REQUIRED_ROW = ("azimuth_deg", "tilt_deg", "peak_2theta_deg", "quality")
+
 
 def _finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _load(path):
+    def reject_constant(value):
+        raise ValueError(f"不允许非有限数字: {value}")
+
     with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        return json.load(handle, parse_constant=reject_constant)
 
 
 def _regress(points):
-    xs = [math.sin(math.radians(row["tilt_deg"])) ** 2 for row in points]
-    ys = [row["strain"] for row in points]
+    xs = [math.sin(math.radians(item["tilt_deg"])) ** 2 for item in points]
+    ys = [item["strain"] for item in points]
     mean_x = sum(xs) / len(xs)
     mean_y = sum(ys) / len(ys)
     denominator = sum((x - mean_x) ** 2 for x in xs)
-    if denominator == 0:
+    if denominator <= 1e-15:
         return None
     slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denominator
     intercept = mean_y - slope * mean_x
@@ -28,53 +34,74 @@ def _regress(points):
     return slope, math.sqrt(sum(value * value for value in residuals) / len(residuals))
 
 
+def _validate_header(data):
+    if not isinstance(data, dict) or any(key not in data for key in REQUIRED_TOP):
+        raise ValueError("输入资料缺少必要字段")
+    for key in ("wavelength_nm", "stress_free_d_nm", "youngs_modulus_gpa", "poisson_ratio"):
+        if not _finite(data[key]):
+            raise ValueError(f"{key} 不是有限数字")
+    if data["wavelength_nm"] <= 0 or data["stress_free_d_nm"] <= 0 or data["youngs_modulus_gpa"] <= 0:
+        raise ValueError("材料参数必须为正数")
+    if not -1.0 < data["poisson_ratio"] < 0.5:
+        raise ValueError("泊松比超出范围")
+    limits = data["limits"]
+    if not isinstance(limits, dict) or not all(_finite(limits.get(key)) and limits[key] >= 0 for key in ("max_tensile_mpa", "max_compressive_mpa")):
+        raise ValueError("工艺限值无效")
+    if "instrument_zero_deg" in data and not _finite(data["instrument_zero_deg"]):
+        raise ValueError("仪器零点不是有限数字")
+    if not isinstance(data["measurements"], list):
+        raise ValueError("measurements 必须是数组")
+
+
 def analyze(data):
+    _validate_header(data)
     wavelength = float(data["wavelength_nm"])
     d0 = float(data["stress_free_d_nm"])
     youngs_modulus = float(data["youngs_modulus_gpa"])
     poisson_ratio = float(data["poisson_ratio"])
     zero = float(data.get("instrument_zero_deg", 0.0))
     limits = data["limits"]
-
     grouped = defaultdict(dict)
     issues = []
-    for row in data.get("measurements", []):
-        required = ("azimuth_deg", "tilt_deg", "peak_2theta_deg", "quality")
-        if not all(key in row for key in required):
+
+    for row in data["measurements"]:
+        if not isinstance(row, dict) or not all(key in row for key in REQUIRED_ROW):
             issues.append("MALFORMED_MEASUREMENT")
             continue
-        if not all(_finite(row[key]) for key in required):
+        if not all(_finite(row[key]) for key in REQUIRED_ROW):
             issues.append("NONFINITE_MEASUREMENT")
             continue
-        if row["quality"] < 0 or row["quality"] > 1:
+        quality = float(row["quality"])
+        if not 0.0 <= quality <= 1.0:
             issues.append("OUT_OF_RANGE_QUALITY")
             continue
-        if row["quality"] < 0.8:
+        if quality < 0.8:
             issues.append("LOW_QUALITY")
             continue
-        if row["tilt_deg"] < 0 or row["tilt_deg"] > 85 or row["peak_2theta_deg"] <= 0:
+        tilt = float(row["tilt_deg"])
+        peak = float(row["peak_2theta_deg"])
+        if not 0.0 <= tilt <= 85.0 or peak <= 0.0:
             issues.append("OUT_OF_RANGE_MEASUREMENT")
             continue
-        corrected = row["peak_2theta_deg"] - zero
-        theta = math.radians(corrected / 2.0)
+        corrected_two_theta = peak - zero
+        theta = math.radians(corrected_two_theta / 2.0)
         sine = math.sin(theta)
-        if sine <= 0:
+        if not 0.0 < corrected_two_theta < 180.0 or sine <= 0.0:
             issues.append("INVALID_ANGLE")
             continue
         spacing = wavelength / (2.0 * sine)
         strain = (spacing - d0) / d0
-        azimuth = row["azimuth_deg"]
-        tilt = row["tilt_deg"]
-        candidate = {"tilt_deg": tilt, "strain": strain, "quality": row["quality"]}
+        candidate = {"tilt_deg": tilt, "strain": strain, "quality": quality, "peak_2theta_deg": peak}
+        azimuth = float(row["azimuth_deg"])
         existing = grouped[azimuth].get(tilt)
         if existing is not None:
             issues.append("DUPLICATE_MEASUREMENT")
-            if candidate["quality"] <= existing["quality"]:
+            if (candidate["quality"], -candidate["peak_2theta_deg"]) <= (existing["quality"], -existing["peak_2theta_deg"]):
                 continue
         grouped[azimuth][tilt] = candidate
 
-    directions = []
     scale = youngs_modulus * 1000.0 / (1.0 + poisson_ratio)
+    directions = []
     for azimuth in sorted(grouped):
         rows = [grouped[azimuth][tilt] for tilt in sorted(grouped[azimuth])]
         if len(rows) < 3:
@@ -89,32 +116,28 @@ def analyze(data):
         directions.append({
             "azimuth_deg": azimuth,
             "stress_mpa": stress,
-            "stress_type": "tensile" if stress >= 0 else "compressive",
+            "stress_type": "tensile" if stress >= 0.0 else "compressive",
             "fit_rmse_mpa": rmse * scale,
             "valid_points": len(rows),
         })
 
     if not directions:
-        status = "REVIEW"
-        max_tensile = 0.0
-        max_compressive = 0.0
-        worst = None
+        status, max_tensile, max_compressive, worst = "REVIEW", 0.0, 0.0, None
     else:
         max_tensile = max((max(item["stress_mpa"], 0.0) for item in directions), default=0.0)
         max_compressive = min((min(item["stress_mpa"], 0.0) for item in directions), default=0.0)
-        worst_item = min(directions, key=lambda item: (-abs(item["stress_mpa"]), item["azimuth_deg"]))
-        worst = worst_item["azimuth_deg"]
-        status = "PASS" if max_tensile <= float(limits["max_tensile_mpa"]) and abs(max_compressive) <= float(limits["max_compressive_mpa"]) else "REJECT"
+        worst = min(directions, key=lambda item: (-abs(item["stress_mpa"]), item["azimuth_deg"]))["azimuth_deg"]
+        tensile_limit = float(limits["max_tensile_mpa"])
+        compressive_limit = float(limits["max_compressive_mpa"])
+        tensile_ok = max_tensile <= tensile_limit or math.isclose(max_tensile, tensile_limit, rel_tol=1e-9, abs_tol=1e-9)
+        compressive_ok = abs(max_compressive) <= compressive_limit or math.isclose(abs(max_compressive), compressive_limit, rel_tol=1e-9, abs_tol=1e-9)
+        status = "PASS" if tensile_ok and compressive_ok else "REJECT"
 
     return {
         "specimen_id": data["specimen_id"],
         "status": status,
         "directions": directions,
-        "summary": {
-            "max_tensile_mpa": max_tensile,
-            "max_compressive_mpa": max_compressive,
-            "worst_azimuth_deg": worst,
-        },
+        "summary": {"max_tensile_mpa": max_tensile, "max_compressive_mpa": max_compressive, "worst_azimuth_deg": worst},
         "issues": sorted(set(issues)),
     }
 
@@ -124,8 +147,7 @@ def main(argv):
         print("用法: xrd_stress_report.py 输入资料 输出报告", file=sys.stderr)
         return 2
     try:
-        data = _load(argv[1])
-        result = analyze(data)
+        result = analyze(_load(argv[1]))
         with open(argv[2], "w", encoding="utf-8") as handle:
             json.dump(result, handle, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
             handle.write("\n")
