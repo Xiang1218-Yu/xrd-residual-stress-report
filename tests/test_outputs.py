@@ -36,20 +36,29 @@ def base(measurements, *, zero=0.0, limits=(350.0, 500.0)):
 
 
 def run_process(data):
+    process, output_text, _, _ = run_process_with_artifacts(data)
+    return process, output_text
+
+
+def run_process_with_artifacts(data, *, initial_output=None):
     env = dict(os.environ)
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         input_path = Path(tmp) / "input.json"
         output_path = Path(tmp) / "output.json"
         input_path.write_text(json.dumps(data), encoding="utf-8")
+        if initial_output is not None:
+            output_path.write_bytes(initial_output)
         process = subprocess.run(
             [sys.executable, str(PROGRAM), str(input_path), str(output_path)],
             capture_output=True,
             text=True,
             env=env,
         )
-        output_text = output_path.read_text(encoding="utf-8") if output_path.exists() else None
-        return process, output_text
+        output_bytes = output_path.read_bytes() if output_path.exists() else None
+        files = sorted(path.name for path in Path(tmp).iterdir())
+        output_text = output_bytes.decode("utf-8") if output_bytes is not None else None
+        return process, output_text, output_bytes, files
 
 
 def run(data):
@@ -211,8 +220,8 @@ def test_near_zero_tilt_variation_requires_review():
     assert "INSUFFICIENT_TILT_VARIATION" in issue_codes(result)
 
 
-def test_invalid_limits_are_rejected():
-    """题面要求工艺限值必须是包含两个非负有限数值的对象。"""
+def test_invalid_limits_are_rejected_without_side_effects():
+    """题面要求无效工艺限值拒收，并保持已有报告和临时目录内容不变。"""
     invalid_limits = (
         None,
         {},
@@ -222,8 +231,12 @@ def test_invalid_limits_are_rejected():
         {"max_tensile_mpa": "350", "max_compressive_mpa": 500.0},
         {"max_tensile_mpa": True, "max_compressive_mpa": 500.0},
     )
+    sentinel = b"previous-report\n"
     for limits in invalid_limits:
         data = base([measurement(0, 100.0, tilt) for tilt in (0, 30, 60)])
         data["limits"] = limits
-        process, _ = run_process(data)
+        process, output_text, output_bytes, files = run_process_with_artifacts(data, initial_output=sentinel)
         assert process.returncode != 0
+        assert process.stderr.startswith("运行失败: ")
+        assert output_bytes == sentinel
+        assert files == ["input.json", "output.json"]
