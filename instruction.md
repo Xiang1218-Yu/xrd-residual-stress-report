@@ -24,4 +24,6 @@ python3 /app/xrd_stress_report.py <输入资料> <输出报告>
 
 输出为 UTF-8 JSON，写入第二个命令行参数指定的文件，并以换行结束。顶层包含 `specimen_id`、`status`、`directions`、`summary`、`issues`。每个有效方位包含 `azimuth_deg`、`stress_mpa`、`stress_type`、`fit_rmse_mpa`、`valid_points`。正值应标为 `tensile`，负值应标为 `compressive`；`summary` 至少给出 `max_tensile_mpa`、`max_compressive_mpa` 和 `worst_azimuth_deg`。
 
+`issues` 是问题对象数组；每项包含 `code`、`count` 和 `message`，其中 `code` 是稳定的问题标识，`count` 是该类问题的数量，`message` 用于说明原因。相同问题应合并为一项，报告中的问题顺序应保持确定，不应随测量记录输入顺序变化。
+
 当所有有效方位的拉应力和压应力绝对值都不超过资料中的工艺限值时，状态为 `PASS`；任一限值超出时为 `REJECT`。没有足够有效数据支持应力结论时为 `REVIEW`。最危险方位按应力绝对值最大确定，出现并列时选择数值较小的方位。测量记录的排列顺序改变后，报告内容应保持一致。参数数量不对或输入无法解析时，标准错误输出以 `用法: ` 或 `运行失败: ` 开头的单行信息并以非零状态退出。

@@ -56,6 +56,11 @@ def stress(result, azimuth):
     return next(item["stress_mpa"] for item in result["directions"] if item["azimuth_deg"] == azimuth)
 
 
+def issue_codes(result):
+    """提取报告中的稳定问题标识，避免测试依赖说明文本。"""
+    return {item["code"] for item in result["issues"]}
+
+
 def test_positive_zero_correction():
     """题面要求先扣除正向仪器零点，再按布拉格定律计算应力。"""
     result = run(base([measurement(0, 120.0, tilt, zero=0.12) for tilt in (0, 20, 40, 60)], zero=0.12))
@@ -110,7 +115,7 @@ def test_low_quality_is_excluded():
     rows.append(measurement(0, 900.0, 50, quality=0.2))
     result = run(base(rows))
     assert result and stress(result, 0) == pytest.approx(80.0, rel=1e-4, abs=1e-4)
-    assert "LOW_QUALITY" in result["issues"] and result["directions"][0]["valid_points"] == 4
+    assert "LOW_QUALITY" in issue_codes(result) and result["directions"][0]["valid_points"] == 4
 
 
 def test_duplicate_keeps_higher_quality():
@@ -118,7 +123,7 @@ def test_duplicate_keeps_higher_quality():
     rows = [measurement(45, 80.0, 0), measurement(45, 80.0, 25, quality=0.95), measurement(45, 900.0, 25, quality=0.90), measurement(45, 80.0, 50), measurement(45, 80.0, 70)]
     result = run(base(rows))
     assert result and stress(result, 45) == pytest.approx(80.0, rel=1e-4, abs=1e-4)
-    assert result["directions"][0]["valid_points"] == 4 and "DUPLICATE_MEASUREMENT" in result["issues"]
+    assert result["directions"][0]["valid_points"] == 4 and "DUPLICATE_MEASUREMENT" in issue_codes(result)
 
 
 def test_duplicate_result_is_order_invariant():
@@ -133,7 +138,7 @@ def test_duplicate_result_is_order_invariant():
     assert stress(first, 90) == pytest.approx(-180.0, rel=1e-4, abs=1e-4)
     assert first["directions"][0]["valid_points"] == 3
     assert first["directions"][1]["valid_points"] == 3
-    assert "DUPLICATE_MEASUREMENT" in first["issues"]
+    assert "DUPLICATE_MEASUREMENT" in issue_codes(first)
 
 
 def test_invalid_measurements_are_reported():
@@ -142,14 +147,14 @@ def test_invalid_measurements_are_reported():
     rows += [{"azimuth_deg": 0, "tilt_deg": 90, "peak_2theta_deg": 70, "quality": 0.9}, {"azimuth_deg": 0, "tilt_deg": 20, "peak_2theta_deg": -1, "quality": 0.9}, {"azimuth_deg": 0, "tilt_deg": 20, "peak_2theta_deg": 70, "quality": 1.2}]
     result = run(base(rows))
     assert result and len(result["directions"]) == 1
-    assert "OUT_OF_RANGE_MEASUREMENT" in result["issues"] and "OUT_OF_RANGE_QUALITY" in result["issues"]
+    assert issue_codes(result) >= {"INVALID_ANGLE", "OUT_OF_RANGE_TILT", "OUT_OF_RANGE_QUALITY"}
 
 
 def test_insufficient_points_requires_review():
     """题面要求一个方位少于三个有效倾转点时进入复核。"""
     result = run(base([measurement(0, 100.0, 20), measurement(0, 100.0, 40)]))
     assert result and result["status"] == "REVIEW" and result["directions"] == []
-    assert "INSUFFICIENT_POINTS" in result["issues"]
+    assert "INSUFFICIENT_TILT_POINTS" in issue_codes(result)
 
 
 def test_equal_quality_duplicate_tie_is_stable():
@@ -158,7 +163,7 @@ def test_equal_quality_duplicate_tie_is_stable():
     reversed_rows = list(reversed(rows))
     first, second = run(base(rows)), run(base(reversed_rows))
     assert first == second
-    assert first and "DUPLICATE_MEASUREMENT" in first["issues"]
+    assert first and "DUPLICATE_MEASUREMENT" in issue_codes(first)
 
 
 def test_limit_boundary_passes():

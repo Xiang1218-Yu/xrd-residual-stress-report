@@ -80,8 +80,11 @@ def analyze(data):
             continue
         tilt = float(row["tilt_deg"])
         peak = float(row["peak_2theta_deg"])
-        if not 0.0 <= tilt <= 85.0 or peak <= 0.0:
-            issues.append("OUT_OF_RANGE_MEASUREMENT")
+        if not 0.0 <= tilt <= 85.0:
+            issues.append("OUT_OF_RANGE_TILT")
+            continue
+        if peak <= 0.0:
+            issues.append("INVALID_ANGLE")
             continue
         corrected_two_theta = peak - zero
         theta = math.radians(corrected_two_theta / 2.0)
@@ -105,7 +108,7 @@ def analyze(data):
     for azimuth in sorted(grouped):
         rows = [grouped[azimuth][tilt] for tilt in sorted(grouped[azimuth])]
         if len(rows) < 3:
-            issues.append("INSUFFICIENT_POINTS")
+            issues.append("INSUFFICIENT_TILT_POINTS")
             continue
         fit = _regress(rows)
         if fit is None:
@@ -133,12 +136,27 @@ def analyze(data):
         compressive_ok = abs(max_compressive) <= compressive_limit or math.isclose(abs(max_compressive), compressive_limit, rel_tol=1e-9, abs_tol=1e-9)
         status = "PASS" if tensile_ok and compressive_ok else "REJECT"
 
+    issue_messages = {
+        "DUPLICATE_MEASUREMENT": "重复测量已去重",
+        "INVALID_ANGLE": "修正后两倍角无法用于布拉格计算",
+        "INSUFFICIENT_TILT_POINTS": "有效倾转点少于 3 个",
+        "INSUFFICIENT_TILT_VARIATION": "有效倾转点没有变化",
+        "LOW_QUALITY": "峰拟合质量低于 0.8",
+        "MALFORMED_MEASUREMENT": "测量记录缺少必要字段",
+        "NONFINITE_MEASUREMENT": "测量记录包含非有限数字",
+        "OUT_OF_RANGE_QUALITY": "峰拟合质量超出 0 到 1",
+        "OUT_OF_RANGE_TILT": "倾转角超出 0 到 85 度",
+    }
+    issue_report = [
+        {"code": code, "count": issues.count(code), "message": issue_messages.get(code, code)}
+        for code in sorted(set(issues))
+    ]
     return {
         "specimen_id": data["specimen_id"],
         "status": status,
         "directions": directions,
         "summary": {"max_tensile_mpa": max_tensile, "max_compressive_mpa": max_compressive, "worst_azimuth_deg": worst},
-        "issues": sorted(set(issues)),
+        "issues": issue_report,
     }
 
 
