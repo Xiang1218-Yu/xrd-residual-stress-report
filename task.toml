@@ -8,6 +8,8 @@ keywords = ["X-ray diffraction", "materials", "residual stress", "scientific com
 
 [agent]
 timeout_sec = 3600
+# Agent edits only /app as an unprivileged account.
+user = "agent"
 
 [environment]
 build_timeout_sec = 900
@@ -19,6 +21,9 @@ allow_internet = true
 
 [verifier]
 timeout_sec = 300
+# The verifier owns the mounted tests and reward path; it must not inherit agent privileges.
+user = "root"
+environment_mode = "shared"
 
 [metadata]
 difficulty = "expert"

@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import pwd
 import random
 import subprocess
 import sys
@@ -9,6 +10,23 @@ from pathlib import Path
 import pytest
 
 PROGRAM = Path(os.environ.get("PROGRAM", "/app/xrd_stress_report.py"))
+# Candidate code runs with the immutable system interpreter, not the private
+# verifier virtualenv whose parent directory is intentionally unreadable.
+CANDIDATE_PYTHON = Path("/usr/local/bin/python3")
+AGENT = pwd.getpwnam("agent")
+CANDIDATE_ENV = {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": AGENT.pw_dir,
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+}
+
+
+def _run_as_agent():
+    """Drop the verifier's root privileges before executing mutable candidate code."""
+    os.setgroups([])
+    os.setgid(AGENT.pw_gid)
+    os.setuid(AGENT.pw_uid)
 
 
 def peak_for_stress(stress_mpa, tilt_deg, *, zero=0.0, d0=0.203, wavelength=0.2291, youngs=210.0, poisson=0.30):
@@ -41,22 +59,33 @@ def run_process(data):
 
 
 def run_process_with_artifacts(data, *, initial_output=None):
-    env = dict(os.environ)
     import tempfile
+
+    # The verifier creates inputs but then gives only this disposable directory
+    # to the unprivileged candidate.  Candidate code never receives the verifier
+    # environment, test mount, result XML, or writable reward path.
     with tempfile.TemporaryDirectory() as tmp:
-        input_path = Path(tmp) / "input.json"
-        output_path = Path(tmp) / "output.json"
+        workdir = Path(tmp)
+        os.chown(workdir, AGENT.pw_uid, AGENT.pw_gid)
+        input_path = workdir / "input.json"
+        output_path = workdir / "output.json"
         input_path.write_text(json.dumps(data), encoding="utf-8")
+        os.chown(input_path, AGENT.pw_uid, AGENT.pw_gid)
+        input_path.chmod(0o600)
         if initial_output is not None:
             output_path.write_bytes(initial_output)
+            os.chown(output_path, AGENT.pw_uid, AGENT.pw_gid)
+            output_path.chmod(0o600)
         process = subprocess.run(
-            [sys.executable, str(PROGRAM), str(input_path), str(output_path)],
+            [str(CANDIDATE_PYTHON), "-I", str(PROGRAM), str(input_path), str(output_path)],
             capture_output=True,
             text=True,
-            env=env,
+            cwd=workdir,
+            env=CANDIDATE_ENV,
+            preexec_fn=_run_as_agent,
         )
         output_bytes = output_path.read_bytes() if output_path.exists() else None
-        files = sorted(path.name for path in Path(tmp).iterdir())
+        files = sorted(path.name for path in workdir.iterdir())
         output_text = output_bytes.decode("utf-8") if output_bytes is not None else None
         return process, output_text, output_bytes, files
 
